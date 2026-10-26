@@ -1,0 +1,37 @@
+# Secrets
+Secrets.xcconfig
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode user data
+xcuserdata/
+*.xcuserstate
+*.xcscmblueprint
+
+# Xcode build output
+build/
+DerivedData/
+
+# Swift Package Manager build artifacts
+.build/
+.swiftpm/xcode/xcuserdata/
+
+# Playgrounds
+timeline.xctimeline
+playground.xcworkspace
+
+# Local AI-assistant tooling
+.claude/
+.agents/
+.codex/
+.cursor/
+.gemini/
+.mcp.json
+skills-lock.json
+.vscode/
+
+# Old local copy of the website (lives in michaelsh1.github.io)
+github-pages/
