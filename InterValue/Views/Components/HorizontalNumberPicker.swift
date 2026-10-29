@@ -56,6 +56,43 @@ private struct NumberTextField: UIViewRepresentable {
     }
 }
 
+// MARK: - Direction-locked horizontal pan
+
+/// A pan that only begins when the initial movement is mostly horizontal,
+/// so vertical swipes fall through to the enclosing List / ScrollView.
+private struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (_ translation: CGFloat, _ velocity: CGFloat) -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func handleUIGestureRecognizerAction(_ pan: UIPanGestureRecognizer, context: Context) {
+        let translation = pan.translation(in: pan.view).x
+        switch pan.state {
+        case .changed:
+            onChanged(translation)
+        case .ended, .cancelled:
+            onEnded(translation, pan.velocity(in: pan.view).x)
+        default:
+            break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer else { return true }
+            let v = pan.velocity(in: pan.view)
+            return abs(v.x) > abs(v.y)
+        }
+    }
+}
+
 // MARK: - HorizontalNumberPicker
 
 /// A horizontally scrolling number carousel with snap-to-center behavior.
@@ -107,14 +144,11 @@ struct HorizontalNumberPicker: View {
                     .clipped()
                     .contentShape(Rectangle())
                     .gesture(
-                        DragGesture(minimumDistance: 1)
-                            .onChanged { gesture in
-                                dragOffset = gesture.translation.width
-                            }
-                            .onEnded { gesture in
-                                // Blend in a fraction of predicted velocity for natural feel
-                                let predictedExtra = gesture.predictedEndTranslation.width - gesture.translation.width
-                                let totalOffset = gesture.translation.width + predictedExtra * 0.2
+                        HorizontalPanGesture(
+                            onChanged: { dragOffset = $0 },
+                            onEnded: { translation, velocity in
+                                // Blend in a fraction of release velocity for natural feel
+                                let totalOffset = translation + velocity * 0.1
                                 let indexDelta = Int((-totalOffset / itemWidth).rounded())
                                 let clampedIndex = max(0, min(values.count - 1, selectedIndex + indexDelta))
                                 let newValue = values[clampedIndex]
@@ -124,6 +158,7 @@ struct HorizontalNumberPicker: View {
                                 }
                                 UIImpactFeedbackGenerator(style: .light).impactOccurred()
                             }
+                        )
                     )
                 }
                 .frame(height: itemHeight)
