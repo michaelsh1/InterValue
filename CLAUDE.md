@@ -22,6 +22,10 @@ xcrun devicectl device install app --device <device-id> \
 
 **TestFlight:** `agvtool next-version -all` to bump build, archive Release to `/tmp/InterValue.xcarchive`, export IPA with `ExportOptions.plist`, upload via `xcrun altool` (needs `APP_STORE_API_KEY_ID` / `APP_STORE_API_ISSUER_ID` env vars + the matching `.p8` key).
 
+## Git branches
+
+Commit work only to a branch whose name matches it. Before the first commit of a task, compare the task to the current branch name (`git branch --show-current`). If they don't match — e.g. a UI fix while on `ai-features` — create a fitting branch off `main` (`fix/<topic>`, `feature/<topic>`) and commit there, carrying any uncommitted changes for other work over untouched. Never commit to `main` directly.
+
 ## Architecture
 
 MVVM over SwiftData. Every screen is a `View` + an `@Observable` ViewModel; ViewModels reach SwiftData through the `ModelContext` from the environment.
