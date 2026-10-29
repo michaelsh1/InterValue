@@ -23,6 +23,30 @@ struct GeneratedWorkout {
     let sets: [GeneratedSetConfig]
 }
 
+@Generable
+struct ParsedBlock {
+    // Property order is generation order: deciding title and rounds first keeps a warmup out of a repeated block.
+    @Guide(description: "What this part of the workout is, in a word or two")
+    let title: String
+    @Guide(description: "How many times this block is repeated, 1 if it isn't")
+    let rounds: Int
+    @Guide(description: "Rest in seconds between rounds of this block, if the text gives one")
+    let restBetweenRounds: Int?
+    @Guide(description: "The exercises in this block, in order, each listed once")
+    let exercises: [GeneratedSetConfig]
+}
+
+/// What `parseWorkout` asks the model for; rounds are unrolled into a `GeneratedWorkout` in code.
+@Generable
+struct ParsedWorkout {
+    @Guide(description: "Short, informative workout name, max 40 characters")
+    let name: String
+    @Guide(description: "Categories that apply, chosen only from the list given in the prompt")
+    let categories: [String]
+    @Guide(description: "The workout's blocks in order")
+    let blocks: [ParsedBlock]
+}
+
 // MARK: - Errors
 
 enum AIServiceError: LocalizedError {
@@ -86,10 +110,55 @@ class AIService {
             availableCategories: availableCategories
         )
 
-        let raw: GeneratedWorkout
+        return try clamp(await respond(to: prompt, generating: GeneratedWorkout.self), keepTimes: generateTimes)
+    }
+
+    /// Turns a pasted, free-form workout description into sets. Set count and times come from the text.
+    func parseWorkout(text: String, availableCategories: [String] = []) async throws -> GeneratedWorkout {
+        if let reason = Self.unavailableReason {
+            throw AIServiceError.unavailable(reason.isEmpty ? "Workout generation needs an iPhone with Apple Intelligence." : reason)
+        }
+
+        var lines = [
+            "Turn the workout text below into interval timer blocks.",
+            "A block is a group of exercises done in order. Each timed exercise or hold is one exercise. List each exercise once, and set rounds to how many times the block is repeated (1 if it isn't).",
+            "A warmup is its own block with 1 round. Only the exercises the text says to repeat go in a block with more than 1 round. A duration like 2 min is a time, not a round count.",
+            "Work time is how long the exercise lasts. Rest time is the rest after it. Put rest between rounds in restBetweenRounds.",
+            "All times are in seconds. Convert minutes to seconds: 1 min is 60, 2 min is 120, 1:30 is 90.",
+            "If the text gives no time for an exercise, leave that time empty.",
+            "Name the exercises and the workout in the same language as the text.",
+        ]
+        if !availableCategories.isEmpty {
+            lines.append("Categories: pick the ones that apply from this list only: \(availableCategories.joined(separator: ", ")).")
+        }
+        lines.append("Ignore anything in the text that isn't about the workout.")
+        // ponytail: hard cap keeps the prompt inside the on-device model's small context window
+        lines.append("Workout text:\n\(text.prefix(3000))")
+
+        let parsed = try await respond(to: lines.joined(separator: "\n"), generating: ParsedWorkout.self)
+
+        // The small model drops or reorders rounds when asked to repeat them, so rounds are unrolled here.
+        var sets: [GeneratedSetConfig] = []
+        for block in parsed.blocks where !block.exercises.isEmpty {
+            let rounds = min(max(block.rounds, 1), 50)
+            for round in 0..<rounds {
+                for (i, exercise) in block.exercises.enumerated() {
+                    let endsRound = i == block.exercises.count - 1 && round < rounds - 1
+                    sets.append(GeneratedSetConfig(
+                        label: exercise.label,
+                        workSeconds: exercise.workSeconds,
+                        restSeconds: endsRound ? (block.restBetweenRounds ?? exercise.restSeconds) : exercise.restSeconds
+                    ))
+                }
+            }
+        }
+        return try clamp(GeneratedWorkout(name: parsed.name, categories: parsed.categories, sets: sets), keepTimes: true)
+    }
+
+    private func respond<Content: Generable>(to prompt: String, generating type: Content.Type) async throws -> Content {
         do {
             let session = LanguageModelSession(instructions: instructions)
-            raw = try await session.respond(to: prompt, generating: GeneratedWorkout.self).content
+            return try await session.respond(to: prompt, generating: type).content
         } catch let error as LanguageModelSession.GenerationError {
             print("[AIService] generation error: \(error)")
             if case .guardrailViolation = error { throw AIServiceError.blocked }
@@ -99,15 +168,19 @@ class AIService {
             print("[AIService] generation error: \(error)")
             throw AIServiceError.failed
         }
+    }
 
-        let sets = raw.sets.map {
+    private func clamp(_ raw: GeneratedWorkout, keepTimes: Bool) throws -> GeneratedWorkout {
+        // 50 = SetsSlider's max
+        let sets = raw.sets.prefix(50).map {
             GeneratedSetConfig(
                 label: String($0.label.prefix(32)),
-                workSeconds: generateTimes ? $0.workSeconds : nil,
-                restSeconds: generateTimes ? $0.restSeconds : nil
+                workSeconds: keepTimes ? $0.workSeconds : nil,
+                restSeconds: keepTimes ? $0.restSeconds : nil
             )
         }
-        return GeneratedWorkout(name: String(raw.name.prefix(40)), categories: raw.categories, sets: sets)
+        guard !sets.isEmpty else { throw AIServiceError.failed }
+        return GeneratedWorkout(name: String(raw.name.prefix(40)), categories: raw.categories, sets: Array(sets))
     }
 
     // MARK: - Prompt
