@@ -21,6 +21,8 @@
         <key>UIApplicationSupportsMultipleScenes</key>
         <false/>
     </dict>
+    <key>CADisableMinimumFrameDurationOnPhone</key>
+    <true/>
     <key>UIApplicationSupportsIndirectInputEvents</key>
     <true/>
     <key>UIBackgroundModes</key>

@@ -61,6 +61,9 @@ private struct NumberTextField: UIViewRepresentable {
 /// A pan that only begins when the initial movement is mostly horizontal,
 /// so vertical swipes fall through to the enclosing List / ScrollView.
 private struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
+    /// Fires on every touch-down, before any pan is recognized.
+    var onTouchDown: () -> Void
+    var onBegan: () -> Void
     var onChanged: (CGFloat) -> Void
     var onEnded: (_ translation: CGFloat, _ velocity: CGFloat) -> Void
 
@@ -72,9 +75,16 @@ private struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
         return pan
     }
 
+    func updateUIGestureRecognizer(_ pan: UIPanGestureRecognizer, context: Context) {
+        context.coordinator.onTouchDown = onTouchDown
+    }
+
     func handleUIGestureRecognizerAction(_ pan: UIPanGestureRecognizer, context: Context) {
         let translation = pan.translation(in: pan.view).x
         switch pan.state {
+        case .began:
+            onBegan()
+            onChanged(translation)
         case .changed:
             onChanged(translation)
         case .ended, .cancelled:
@@ -85,11 +95,49 @@ private struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
     }
 
     final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        var onTouchDown: () -> Void = {}
+
+        func gestureRecognizer(_ recognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            onTouchDown()
+            return true
+        }
+
         func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
             guard let pan = recognizer as? UIPanGestureRecognizer else { return true }
             let v = pan.velocity(in: pan.view)
             return abs(v.x) > abs(v.y)
         }
+    }
+}
+
+// MARK: - Display-synced frame loop
+
+/// Calls `onFrame` with the seconds elapsed since `run` on every display refresh,
+/// until it returns false or `stop` is called.
+private final class FrameTicker: NSObject {
+    private var link: CADisplayLink?
+    private var start: CFTimeInterval = 0
+    private var onFrame: (Double) -> Bool = { _ in false }
+
+    var isRunning: Bool { link != nil }
+
+    func run(_ onFrame: @escaping (Double) -> Bool) {
+        stop()
+        self.onFrame = onFrame
+        start = CACurrentMediaTime()
+        let link = CADisplayLink(target: self, selector: #selector(tick))
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 60, maximum: 120, preferred: 120)
+        link.add(to: .main, forMode: .common)
+        self.link = link
+    }
+
+    func stop() {
+        link?.invalidate()
+        link = nil
+    }
+
+    @objc private func tick(_ link: CADisplayLink) {
+        if !onFrame(link.targetTimestamp - start) { stop() }
     }
 }
 
@@ -106,12 +154,25 @@ struct HorizontalNumberPicker: View {
 
     private let itemWidth: CGFloat = 44
     private let itemHeight: CGFloat = 50
+    /// Exponential velocity decay per second during a fling; higher stops sooner.
+    /// 2.0 matches UIScrollView's normal deceleration rate (0.998 per ms).
+    private let friction: CGFloat = 2.0
 
     @State private var dragOffset: CGFloat = 0
     @State private var isEditing = false
     @State private var inputText = ""
+    /// Index the current drag / fling is measured from.
+    @State private var origin = 0
+    @State private var dragAnchor: CGFloat = 0
+    @State private var ticker = FrameTicker()
+    /// The last touch stopped a fling, so it shouldn't also open the editor.
+    @State private var caughtFling = false
 
     private var values: [Int] { Array(range) }
+    private var selectedIndex: Int { values.firstIndex(of: selectedValue) ?? 0 }
+    /// Offsets (relative to `origin`) that put the first / last value at center.
+    private var maxOffset: CGFloat { CGFloat(origin) * itemWidth }
+    private var minOffset: CGFloat { -CGFloat(values.count - 1 - origin) * itemWidth }
 
     var body: some View {
         VStack(spacing: 2) {
@@ -121,7 +182,6 @@ struct HorizontalNumberPicker: View {
             } else {
                 GeometryReader { geo in
                     let containerWidth = geo.size.width
-                    let selectedIndex = values.firstIndex(of: selectedValue) ?? 0
                     // Offset so the selected item is always at the horizontal center
                     let baseOffset = containerWidth / 2 - itemWidth / 2 - CGFloat(selectedIndex) * itemWidth
                     let currentOffset = baseOffset + dragOffset
@@ -133,7 +193,7 @@ struct HorizontalNumberPicker: View {
                             numberItem(value: value, distance: distance)
                                 .frame(width: itemWidth, height: itemHeight)
                                 .onTapGesture {
-                                    if value == selectedValue {
+                                    if value == selectedValue && !caughtFling {
                                         inputText = "\(selectedValue)"
                                         isEditing = true
                                     }
@@ -145,18 +205,15 @@ struct HorizontalNumberPicker: View {
                     .contentShape(Rectangle())
                     .gesture(
                         HorizontalPanGesture(
-                            onChanged: { dragOffset = $0 },
+                            onTouchDown: catchFling,
+                            onBegan: {
+                                ticker.stop()
+                                origin = selectedIndex
+                                dragAnchor = dragOffset
+                            },
+                            onChanged: { move(to: rubberBanded(dragAnchor + $0)) },
                             onEnded: { translation, velocity in
-                                // Blend in a fraction of release velocity for natural feel
-                                let totalOffset = translation + velocity * 0.1
-                                let indexDelta = Int((-totalOffset / itemWidth).rounded())
-                                let clampedIndex = max(0, min(values.count - 1, selectedIndex + indexDelta))
-                                let newValue = values[clampedIndex]
-                                withAnimation(.spring(response: 0.3, dampingFraction: 0.82)) {
-                                    dragOffset = 0
-                                    selectedValue = newValue
-                                }
-                                UIImpactFeedbackGenerator(style: .light).impactOccurred()
+                                fling(from: rubberBanded(dragAnchor + translation), velocity: velocity)
                             }
                         )
                     )
@@ -169,6 +226,88 @@ struct HorizontalNumberPicker: View {
                 .fontWeight(.semibold)
                 .tracking(0.8)
                 .foregroundStyle(.secondary)
+        }
+        .onDisappear { ticker.stop() }
+    }
+
+    // MARK: - Motion
+
+    /// Positions the wheel `x` points from `origin`, selecting whichever value is nearest center.
+    private func move(to x: CGFloat) {
+        let index = max(0, min(values.count - 1, origin - Int((x / itemWidth).rounded())))
+        if index != selectedIndex {
+            selectedValue = values[index]
+            UISelectionFeedbackGenerator().selectionChanged()
+        }
+        dragOffset = x + CGFloat(index - origin) * itemWidth
+    }
+
+    /// Resists dragging past the first / last value.
+    private func rubberBanded(_ x: CGFloat) -> CGFloat {
+        if x > maxOffset { return maxOffset + (x - maxOffset) * 0.3 }
+        if x < minOffset { return minOffset + (x - minOffset) * 0.3 }
+        return x
+    }
+
+    private func fling(from x0: CGFloat, velocity v: CGFloat) {
+        let k = friction
+        let rest = x0 + v / k
+        if x0 > maxOffset || x0 < minOffset || abs(v) < 100 {
+            // Overscrolled or barely moving: spring onto the nearest value.
+            let target = min(max((x0 / itemWidth).rounded() * itemWidth, minOffset), maxOffset)
+            settle(from: x0, velocity: v, to: target)
+        } else if rest > maxOffset || rest < minOffset {
+            // Coast until the end of the range, then bounce off it.
+            let edge = rest > maxOffset ? maxOffset : minOffset
+            let tHit = -log(1 - (edge - x0) * k / v) / k
+            let vHit = min(max(v - k * (edge - x0), -1000), 1000)
+            animate(to: edge) { t in
+                t < tHit
+                    ? x0 + v / k * (1 - exp(-k * t))
+                    : springDisplacement(0, vHit, at: t - tHit).map { edge + $0 }
+            }
+        } else {
+            // Coast with friction, nudging the release speed so it comes to rest exactly on a value.
+            let target = (rest / itemWidth).rounded() * itemWidth
+            animate(to: target) { t in
+                let remaining = (target - x0) * exp(-k * t)
+                return abs(remaining) < 0.5 ? nil : target - remaining
+            }
+        }
+    }
+
+    /// A touch on a coasting wheel stops it on the nearest value; a pan that follows takes over from there.
+    private func catchFling() {
+        caughtFling = ticker.isRunning
+        guard caughtFling else { return }
+        origin = selectedIndex
+        settle(from: dragOffset, velocity: 0, to: 0)
+    }
+
+    private func settle(from x0: CGFloat, velocity v: CGFloat, to target: CGFloat) {
+        let v = min(max(v, -1000), 1000)
+        animate(to: target) { t in springDisplacement(x0 - target, v, at: t).map { target + $0 } }
+    }
+
+    /// Damped spring displacement `t` seconds after starting `a` away at velocity `v`; nil once at rest.
+    private func springDisplacement(_ a: CGFloat, _ v: CGFloat, at t: CGFloat) -> CGFloat? {
+        let omega: CGFloat = 18, zeta: CGFloat = 0.7
+        let omegaD = omega * sqrt(1 - zeta * zeta)
+        let b = (v + zeta * omega * a) / omegaD
+        let envelope = exp(-zeta * omega * t)
+        guard envelope * (abs(a) + abs(b)) > 0.3 else { return nil }
+        return envelope * (a * cos(omegaD * t) + b * sin(omegaD * t))
+    }
+
+    /// Drives the wheel along `position(t)` each frame until it returns nil, then lands on `final`.
+    private func animate(to final: CGFloat, _ position: @escaping (CGFloat) -> CGFloat?) {
+        ticker.run { t in
+            guard let x = position(CGFloat(t)) else {
+                move(to: final)
+                return false
+            }
+            move(to: x)
+            return true
         }
     }
 
