@@ -12,6 +12,9 @@ class WorkoutInterval {
     var workSecondsOverride: Int?
     var restSecondsOverride: Int?
 
+    // Index into the parent workout's blocks (nil = not in a repeat block)
+    var blockIndex: Int?
+
     @Relationship
     var workout: Workout?
 
@@ -21,6 +24,7 @@ class WorkoutInterval {
         label: String,
         workSecondsOverride: Int? = nil,
         restSecondsOverride: Int? = nil,
+        blockIndex: Int? = nil,
         workout: Workout? = nil
     ) {
         self.id = id
@@ -28,6 +32,7 @@ class WorkoutInterval {
         self.label = label
         self.workSecondsOverride = workSecondsOverride
         self.restSecondsOverride = restSecondsOverride
+        self.blockIndex = blockIndex
         self.workout = workout
     }
 }

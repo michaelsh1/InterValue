@@ -34,6 +34,8 @@ Single app target, no packages or extensions. Services live in `InterValue/Servi
 
 **Data model** (SwiftData, container declared in `InterValueApp.swift`): `Workout` (sets, work/rest/prepare seconds, category, favorite, icon, optional sound/countdown overrides) has a cascade `@Relationship` to ordered `WorkoutInterval`s (per-set labels). `AppSettings` is a singleton — `ContentView.onAppear` inserts one if the query is empty; read `settingsResults.first`.
 
+**Repeat blocks:** consecutive intervals sharing a `WorkoutInterval.blockIndex` form a block whose rounds and round rest live in `Workout.blocks`. `Workout.sets` counts editor rows, not what the timer plays — anything that counts, times or plays sets goes through `Workout.flattenedSets()`, which unrolls blocks into the flat list `TimerEngine` runs.
+
 **TimerEngine** pre-computes a flat phase sequence at start (`prepare → work/rest per set → finish`, no rest after the last set) and advances through it using **wall-clock time**, so it survives background suspension. Background execution relies on an AVAudioSession `.playback` category (silent `AVAudioEngine` keep-alive in `SoundManager`); skip/pause/resume just move the cursor in the sequence.
 
 **Navigation:** `TabView` (`ContentView`), default tab `.quickstart`. Active Timer is a `.fullScreenCover`; Create Workout is a `.sheet` with its own `NavigationStack`.

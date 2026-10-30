@@ -46,7 +46,7 @@ struct WorkoutCardView: View {
 
                 if hasCustomIntervals {
                     HStack(spacing: 0) {
-                        Text("Sets \(workout.sets)  |  ")
+                        Text("Sets \(workout.totalSets)  |  ")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
 
@@ -68,7 +68,7 @@ struct WorkoutCardView: View {
                         }
                     }
                 } else {
-                    Text("Sets \(workout.sets)  |  Work \(workLabel)  |  Rest \(restLabel)")
+                    Text("Sets \(workout.totalSets)  |  Work \(workLabel)  |  Rest \(restLabel)")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 }
@@ -188,17 +188,12 @@ struct WorkoutCardView: View {
     }
 
     private var breakdownRows: [BreakdownRow] {
-        (0..<workout.sets).map { i in
-            let interval = workout.intervals.first { $0.setIndex == i }
-            let name: String = {
-                if let lbl = interval?.label, !lbl.isEmpty { return lbl }
-                return "Set \(i + 1)"
-            }()
-            return BreakdownRow(
+        workout.flattenedSets().enumerated().map { i, set in
+            BreakdownRow(
                 id: i,
-                name: name,
-                work: interval?.workSecondsOverride ?? workout.workSeconds,
-                rest: interval?.restSecondsOverride ?? workout.restSeconds
+                name: set.label.isEmpty ? "Set \(i + 1)" : set.label,
+                work: set.workSeconds,
+                rest: set.restSeconds
             )
         }
     }
@@ -231,13 +226,10 @@ struct WorkoutCardView: View {
 
     // MARK: - Helpers
 
-    private var workLabel: String { rangeLabel(for: \.workSecondsOverride, default: workout.workSeconds) }
-    private var restLabel: String { rangeLabel(for: \.restSecondsOverride, default: workout.restSeconds) }
+    private var workLabel: String { rangeLabel(workout.flattenedSets().map(\.workSeconds), default: workout.workSeconds) }
+    private var restLabel: String { rangeLabel(workout.flattenedSets().map(\.restSeconds), default: workout.restSeconds) }
 
-    private func rangeLabel(for override: KeyPath<WorkoutInterval, Int?>, default fallback: Int) -> String {
-        let values = (0..<workout.sets).map { i in
-            workout.intervals.first { $0.setIndex == i }?[keyPath: override] ?? fallback
-        }
+    private func rangeLabel(_ values: [Int], default fallback: Int) -> String {
         let lo = values.min() ?? fallback
         let hi = values.max() ?? fallback
         return lo == hi ? "\(lo)s" : "\(lo)–\(hi)s"

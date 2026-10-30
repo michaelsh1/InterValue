@@ -70,7 +70,7 @@ struct ExportWorkoutsView: View {
                                     Text(workout.name)
                                         .foregroundStyle(.primary)
                                         .font(.body)
-                                    Text("\(workout.sets) sets · \(workout.totalDurationFormatted)")
+                                    Text("\(workout.totalSets) sets · \(workout.totalDurationFormatted)")
                                         .foregroundStyle(.secondary)
                                         .font(.caption)
                                 }

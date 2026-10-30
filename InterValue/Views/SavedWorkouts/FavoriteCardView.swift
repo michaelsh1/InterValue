@@ -80,6 +80,6 @@ struct FavoriteCardView: View {
     }
 
     private var abbreviatedInfo: String {
-        "\(workout.sets) sets · \(workout.totalDurationFormatted)"
+        "\(workout.totalSets) sets · \(workout.totalDurationFormatted)"
     }
 }

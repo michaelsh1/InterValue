@@ -13,6 +13,15 @@ struct WorkoutConfiguration {
     let intervalLabels: [String]           // Per-set labels, may be empty
     let perSetWorkOverrides: [Int?]        // nil entry = use global workSeconds
     let perSetRestOverrides: [Int?]        // nil entry = use global restSeconds
+    var blockPositions: [BlockPosition?] = []  // nil entry = not in a repeat block
+}
+
+/// Where a set sits inside a repeat block (all 1-based), for the timer's set counter.
+struct BlockPosition {
+    let round: Int
+    let rounds: Int
+    let exercise: Int
+    let exercises: Int
 }
 
 struct WorkoutIcons {
