@@ -99,8 +99,6 @@ struct CreateWorkoutView: View {
                 setCount: vm.sets > 0 ? vm.sets : CreateWorkoutViewModel.sampleExercises.count,
                 existingConfigs: vm.perSetConfigs,
                 onApply: { generated in
-                    // "From Text" decides its own set count; "Build" already returns vm.sets sets
-                    vm.sets = generated.sets.count
                     vm.applyGeneratedConfigs(generated.sets)
                     if vm.name.trimmingCharacters(in: .whitespaces).isEmpty {
                         vm.name = String(generated.name.prefix(40))
