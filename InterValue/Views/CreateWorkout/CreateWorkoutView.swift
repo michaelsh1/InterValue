@@ -9,15 +9,18 @@ struct CreateWorkoutView: View {
     @Environment(\.colorScheme) private var colorScheme
     @State private var vm: CreateWorkoutViewModel
     @State private var expandedSets: Set<UUID> = []
-    @State private var showPerSetSettings: Bool = false
+    @State private var showPerSetSettings: Bool = true
     @State private var showAIDrawer: Bool = false
     @State private var aiUnavailableMessage: String? = nil
     @State private var showIconPicker: Bool = false
-    @State private var draggingIndex: Int? = nil
-    @State private var dragOffsetY: CGFloat = 0
+    @State private var reorder: Reorder? = nil           // exercise or block being dragged
+    @State private var rowFrames: [UUID: CGRect] = [:]   // in the per-set list's coordinate space
+    @State private var cardFrames: [Int: CGRect] = [:]   // block index → card frame, same space
+    @State private var expandedRoundRests: Set<Int> = [] // block indexes
     @State private var openSwipeID: UUID? = nil
     @State private var deleteCount = 0
-    private let rowSlotHeight: CGFloat = 46
+    @State private var showClearConfirmation = false
+    @State private var blockToDelete: Int? = nil       // block awaiting delete confirmation
 
     init(workout: Workout? = nil, settings: AppSettings? = nil) {
         _vm = State(initialValue: CreateWorkoutViewModel(workout: workout, settings: settings))
@@ -92,7 +95,8 @@ struct CreateWorkoutView: View {
         }
         .sheet(isPresented: $showAIDrawer) {
             AIGenerateDrawerView(
-                setCount: vm.sets,
+                // An emptied list has no count to fill, so Build makes a sample-sized workout
+                setCount: vm.sets > 0 ? vm.sets : CreateWorkoutViewModel.sampleExercises.count,
                 existingConfigs: vm.perSetConfigs,
                 onApply: { generated in
                     // "From Text" decides its own set count; "Build" already returns vm.sets sets
@@ -189,7 +193,6 @@ struct CreateWorkoutView: View {
 
     private var timerSection: some View {
         Section("Timer") {
-            SetsSlider(title: "SETS", sets: $vm.sets)
             DualTimePicker(title: "WORK",    totalSeconds: $vm.workSeconds)
             DualTimePicker(title: "REST",    totalSeconds: $vm.restSeconds)
             DualTimePicker(title: "PREPARE", totalSeconds: $vm.prepareSeconds)
@@ -202,20 +205,6 @@ struct CreateWorkoutView: View {
 
     // MARK: - Per-Set Settings
 
-    private func dragTargetIndex(source: Int, offsetY: CGFloat) -> Int {
-        let steps = Int((offsetY / rowSlotHeight).rounded())
-        return max(0, min(vm.sets - 1, source + steps))
-    }
-
-    private func rowShiftOffset(for i: Int) -> CGFloat {
-        guard let source = draggingIndex else { return 0 }
-        let target = dragTargetIndex(source: source, offsetY: dragOffsetY)
-        if i == source { return 0 }
-        if source < target && i > source && i <= target { return -rowSlotHeight }
-        if source > target && i < source && i >= target { return rowSlotHeight }
-        return 0
-    }
-
     private var perSetSettingsSection: some View {
         Section {
             Button {
@@ -224,112 +213,430 @@ struct CreateWorkoutView: View {
                 }
             } label: {
                 HStack {
+                    // Color.primary, not .primary: inside a Form button .primary resolves to the tint
                     Text("Per-Set Settings")
                         .font(.subheadline.weight(.semibold))
-                        .foregroundStyle(.primary)
+                        .foregroundStyle(Color.primary)
                     Spacer()
                     Image(systemName: "chevron.down")
                         .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(Color.secondary)
                         .rotationEffect(.degrees(showPerSetSettings ? 180 : 0))
                         .animation(.spring(response: 0.3, dampingFraction: 0.8), value: showPerSetSettings)
                 }
             }
             .listRowInsets(EdgeInsets(top: 11, leading: 16, bottom: 11, trailing: 16))
 
-            if showPerSetSettings && AIService.unavailableReason != "" {
-                Button {
-                    if let reason = AIService.unavailableReason {
-                        aiUnavailableMessage = reason
-                    } else {
-                        showAIDrawer = true
-                    }
-                } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "wand.and.sparkles")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(colorScheme == .dark ? .white : Color.blue)
-                        Text("Generate Workout")
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(colorScheme == .dark ? .white : Color.blue)
-                        Spacer()
-                    }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background {
-                        RoundedRectangle(cornerRadius: 10, style: .continuous)
-                            .fill(Color.blue.opacity(0.1))
-                            .overlay {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .stroke(Color.blue.opacity(0.7), lineWidth: 1.5)
+            if showPerSetSettings {
+                VStack(spacing: 10) {
+                    ForEach(vm.setGroups) { group in
+                        Group {
+                            if let block = group.blockIndex {
+                                blockCard(block, rows: group.rows)
+                            } else {
+                                setRows(group.rows, numberedFrom: 0)
                             }
+                        }
+                        .zIndex(holdsDragged(group) ? 1 : 0)  // so the dragged item floats over later groups
                     }
-                    .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                }
-                .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 4, trailing: 16))
-                .listRowSeparator(.hidden)
 
-                VStack(spacing: 8) {
-                    ForEach(Array(vm.perSetConfigs.enumerated()), id: \.element.id) { i, item in
-                        let isDragging = draggingIndex == i
-                        SetSettingsRow(
-                            setIndex: i,
-                            config: configBinding(for: i),
-                            isExpanded: expandedSets.contains(item.id),
-                            globalWorkSeconds: vm.workSeconds,
-                            globalRestSeconds: vm.restSeconds,
-                            onToggleExpand: {
-                                openSwipeID = nil
-                                if expandedSets.contains(item.id) { expandedSets.remove(item.id) }
-                                else { expandedSets.insert(item.id) }
-                            },
-                            onDragHandleChanged: { value in
-                                if draggingIndex == nil {
-                                    draggingIndex = i
-                                    openSwipeID = nil
-                                    expandedSets.removeAll()
-                                }
-                                dragOffsetY = value.translation.height
-                            },
-                            onDragHandleEnded: { value in
-                                guard let source = draggingIndex else { return }
-                                let target = dragTargetIndex(source: source, offsetY: value.translation.height)
-                                if target != source {
-                                    vm.perSetConfigs.move(
-                                        fromOffsets: IndexSet(integer: source),
-                                        toOffset: target > source ? target + 1 : target
-                                    )
-                                }
-                                withAnimation(.spring(response: 0.25, dampingFraction: 0.8)) {
-                                    draggingIndex = nil
-                                    dragOffsetY = 0
-                                }
-                            },
-                            canDelete: vm.sets > 1,
-                            isSwipeOpen: openSwipeID == item.id,
-                            onSwipeOpenChange: { open in
-                                if open { openSwipeID = item.id }
-                                else if openSwipeID == item.id { openSwipeID = nil }
-                            },
-                            onDelete: {
-                                expandedSets.remove(item.id)
-                                openSwipeID = nil
-                                deleteCount += 1
-                                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
-                                    vm.deleteSet(id: item.id)
-                                }
+                    HStack(spacing: 8) {
+                        listButton("+ Exercise") { vm.addSet() }
+                        listButton("+ Block") { vm.addBlock() }
+                        if vm.sets > 0 {
+                            listButton("Clear", tint: .red) {
+                                if vm.hasSetContent { showClearConfirmation = true } else { clearSets() }
                             }
-                        )
-                        .offset(y: isDragging ? dragOffsetY : rowShiftOffset(for: i))
-                        .zIndex(isDragging ? 1 : 0)
-                        .shadow(color: isDragging ? .black.opacity(0.18) : .clear, radius: 8, y: 4)
-                        .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.8), value: rowShiftOffset(for: i))
+                            .accessibilityLabel("Clear exercises")
+                            .confirmationDialog("Clear all exercises?", isPresented: $showClearConfirmation, titleVisibility: .visible) {
+                                Button("Clear All", role: .destructive) {
+                                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { clearSets() }
+                                }
+                            } message: {
+                                Text("Labels, custom times and blocks will be removed.")
+                            }
+                        }
+                    }
+
+                    // "" = this device can't run Apple Intelligence: no button, but the list above stays
+                    if AIService.unavailableReason != "" {
+                        generateWorkoutButton
                     }
                 }
+                .coordinateSpace(.named(reorderSpace))
+                .overlay(alignment: .top) {
+                    if let target = reorder?.target {
+                        // Where the dragged item will land; coral when it lands inside a block
+                        Capsule()
+                            .fill(target.block == nil ? Color.accentColor : coral)
+                            .frame(height: 3)
+                            .padding(.horizontal, target.block == nil ? 0 : 10)
+                            .offset(y: target.y - 1.5)
+                            .allowsHitTesting(false)
+                    }
+                }
+                .sensoryFeedback(.selection, trigger: reorder?.target)
                 .sensoryFeedback(.impact(weight: .medium), trigger: deleteCount)
                 .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
+                .listRowSeparator(.hidden)
             }
         }
+    }
+
+    private var generateWorkoutButton: some View {
+        Button {
+            if let reason = AIService.unavailableReason {
+                aiUnavailableMessage = reason
+            } else {
+                showAIDrawer = true
+            }
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "wand.and.sparkles")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(colorScheme == .dark ? .white : Color.blue)
+                Text("Generate Workout")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(colorScheme == .dark ? .white : Color.blue)
+                Spacer()
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 10)
+            .background {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.blue.opacity(0.1))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 10, style: .continuous)
+                            .stroke(Color.blue.opacity(0.7), lineWidth: 1.5)
+                    }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// One group's rows. Placeholders count from `numberedFrom` (a block's rows restart at "Set 1").
+    private func setRows(_ rows: [(offset: Int, element: PerSetConfig)], numberedFrom first: Int) -> some View {
+        VStack(spacing: 8) {
+            ForEach(rows, id: \.element.id) { i, item in
+                let isDragged = reorder?.item == .row(item.id)
+                SetSettingsRow(
+                    setIndex: i - first,
+                    config: configBinding(for: i),
+                    isExpanded: expandedSets.contains(item.id),
+                    globalWorkSeconds: vm.workSeconds,
+                    globalRestSeconds: vm.restSeconds,
+                    onToggleExpand: {
+                        openSwipeID = nil
+                        if expandedSets.contains(item.id) { expandedSets.remove(item.id) }
+                        else { expandedSets.insert(item.id) }
+                    },
+                    onDragHandleChanged: { value in
+                        beginReorder(.row(item.id), from: rowFrames[item.id])
+                        updateReorder(translation: value.translation.height)
+                    },
+                    onDragHandleEnded: { _ in endReorder() },
+                    canDelete: vm.sets > 1,
+                    isSwipeOpen: openSwipeID == item.id,
+                    onSwipeOpenChange: { open in
+                        if open { openSwipeID = item.id }
+                        else if openSwipeID == item.id { openSwipeID = nil }
+                    },
+                    onDelete: {
+                        expandedSets.remove(item.id)
+                        openSwipeID = nil
+                        deleteCount += 1
+                        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                            vm.deleteSet(id: item.id)
+                        }
+                    }
+                )
+                .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(reorderSpace)) } action: { rowFrames[item.id] = $0 }
+                .offset(y: isDragged ? reorder?.translation ?? 0 : 0)
+                .zIndex(isDragged ? 1 : 0)
+                .shadow(color: isDragged ? .black.opacity(0.25) : .clear, radius: 10, y: 4)
+            }
+        }
+    }
+
+    // MARK: - Reorder
+
+    /// Starts dragging `item`, picked up from `frame` (in the list's coordinate space).
+    private func beginReorder(_ item: Reorder.Item, from frame: CGRect?) {
+        guard reorder == nil, let frame else { return }
+        openSwipeID = nil
+        reorder = Reorder(item: item, start: frame)
+    }
+
+    /// Follows the drag and picks the insertion slot nearest the dragged item's center.
+    private func updateReorder(translation: CGFloat) {
+        guard var r = reorder else { return }
+        r.translation = translation
+        let center = r.start.midY + translation
+        let slots = switch r.item {
+        case .row(let id): rowSlots(excluding: id, start: r.start)
+        case .block(let block): blockSlots(excluding: block)
+        }
+        r.target = slots.min { abs($0.y - center) < abs($1.y - center) }
+        reorder = r
+    }
+
+    private func endReorder() {
+        guard let r = reorder else { return }
+        let blockCount = vm.blocks.count
+        withAnimation(.spring(response: 0.3, dampingFraction: 0.85)) {
+            switch (r.item, r.target) {
+            case (.row(let id), let target?): vm.moveSet(id: id, to: target.index, block: target.block)
+            case (.block(let block), let target?): vm.moveBlock(block, to: target.index)
+            default: break
+            }
+            reorder = nil
+        }
+        // Round-rest pickers are keyed by block index, which moving or emptying a block renumbers
+        if case .block = r.item { expandedRoundRests.removeAll() }
+        if vm.blocks.count != blockCount { expandedRoundRests.removeAll() }
+    }
+
+    /// Where a dragged row can land: between any two rows, and just inside or just outside each block.
+    private func rowSlots(excluding id: UUID, start: CGRect) -> [DropTarget] {
+        let rows = vm.perSetConfigs
+        guard let from = rows.firstIndex(where: { $0.id == id }) else { return [] }
+        let others = rows.filter { $0.id != id }
+        var slots: [DropTarget] = []
+        func add(_ index: Int, _ block: Int?, _ y: CGFloat) {
+            // Neighboring groups both offer the spot between them; keep one
+            if let last = slots.last, last.index == index, last.block == block { return }
+            slots.append(DropTarget(index: index, block: block, y: y))
+        }
+        var i = 0
+        while i < others.count {
+            let block = others[i].blockIndex
+            var end = i + 1
+            while end < others.count, others[end].blockIndex == block { end += 1 }
+            let card = block.flatMap { cardFrames[$0] }
+            if let card { add(i, nil, card.minY - 5) }                       // above the block
+            for k in i..<end {
+                if let f = rowFrames[others[k].id] { add(k, block, f.minY - 4) }
+            }
+            if let f = rowFrames[others[end - 1].id] { add(end, block, f.maxY + 4) }
+            if let card { add(end, nil, card.maxY + 5) }                     // below the block
+            i = end
+        }
+        // It was its block's only row: dropping it back keeps the block
+        if let block = rows[from].blockIndex, !others.contains(where: { $0.blockIndex == block }) {
+            slots.append(DropTarget(index: from, block: block, y: start.midY))
+        }
+        return slots
+    }
+
+    /// Where a dragged block can land: before or after any standalone row or other block.
+    private func blockSlots(excluding block: Int) -> [DropTarget] {
+        let others = vm.perSetConfigs.filter { $0.blockIndex != block }
+        var slots: [DropTarget] = []
+        var i = 0
+        while i < others.count {
+            let other = others[i].blockIndex
+            var end = i + 1
+            if other != nil { while end < others.count, others[end].blockIndex == other { end += 1 } }
+            if let f = other.flatMap({ cardFrames[$0] }) ?? rowFrames[others[i].id] {
+                slots.append(DropTarget(index: i, block: nil, y: f.minY - 5))
+                if end == others.count { slots.append(DropTarget(index: end, block: nil, y: f.maxY + 5)) }
+            }
+            i = end
+        }
+        return slots
+    }
+
+    private func holdsDragged(_ group: SetGroup) -> Bool {
+        switch reorder?.item {
+        case .row(let id): group.rows.contains { $0.element.id == id }
+        case .block(let block): group.blockIndex == block
+        case nil: false
+        }
+    }
+
+    // MARK: - Repeat Blocks
+
+    private func blockCard(_ block: Int, rows: [(offset: Int, element: PerSetConfig)]) -> some View {
+        let binding = blockBinding(block)
+        let isRestExpanded = expandedRoundRests.contains(block)
+        return VStack(spacing: 0) {
+            HStack(spacing: 8) {
+                // Drags the whole block
+                Image(systemName: "line.3.horizontal")
+                    .font(.footnote)
+                    .foregroundStyle(Color.secondary)
+                    .frame(width: 20, height: 30)
+                    .contentShape(Rectangle().inset(by: -8))
+                    .gesture(
+                        DragGesture(minimumDistance: 5, coordinateSpace: .global)
+                            .onChanged { value in
+                                beginReorder(.block(block), from: cardFrames[block])
+                                updateReorder(translation: value.translation.height)
+                            }
+                            .onEnded { _ in endReorder() }
+                    )
+                Image(systemName: "repeat")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(coral)
+                Text("Block \(block + 1)")
+                    .font(.subheadline.weight(.semibold))
+                Spacer()
+                roundsStepper(binding.rounds)
+                Button {
+                    if vm.blockHasContent(block) { blockToDelete = block } else { deleteBlock(block) }
+                } label: {
+                    Image(systemName: "trash")
+                        .font(.subheadline)
+                        .foregroundStyle(Color.secondary)
+                        .frame(width: 30, height: 30)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Delete block \(block + 1)")
+                .confirmationDialog(
+                    "Delete Block \(block + 1)?",
+                    isPresented: Binding(get: { blockToDelete == block }, set: { if !$0 { blockToDelete = nil } }),
+                    titleVisibility: .visible
+                ) {
+                    Button("Delete Block", role: .destructive) { deleteBlock(block) }
+                } message: {
+                    Text("Its exercises will be removed too.")
+                }
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 10)
+
+            blockDivider
+
+            VStack(alignment: .leading, spacing: 8) {
+                setRows(rows, numberedFrom: rows.first?.offset ?? 0)
+
+                Button {
+                    withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { vm.addSet(toBlock: block) }
+                } label: {
+                    Text("+ Add exercise")
+                        .font(.subheadline)
+                        .foregroundStyle(coral)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            .padding(8)
+
+            blockDivider
+
+            Button {
+                withAnimation(.spring(response: 0.3, dampingFraction: 0.8)) {
+                    if isRestExpanded { expandedRoundRests.remove(block) } else { expandedRoundRests.insert(block) }
+                }
+            } label: {
+                HStack(spacing: 8) {
+                    Text("Rest between rounds")
+                        .font(.subheadline)
+                    Spacer()
+                    Text(clock(binding.wrappedValue.restBetweenRoundsSeconds))
+                        .font(.footnote.monospacedDigit())
+                        .foregroundStyle(.secondary)
+                    Image(systemName: "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                        .rotationEffect(.degrees(isRestExpanded ? 90 : 0))
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+
+            if isRestExpanded {
+                DualTimePicker(title: "ROUND REST", totalSeconds: binding.restBetweenRoundsSeconds)
+                    .padding([.horizontal, .bottom], 12)
+            }
+        }
+        .background(coral.opacity(0.08), in: RoundedRectangle(cornerRadius: 14))
+        .background(Color(.secondarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 14))  // opaque while dragged
+        .overlay {
+            RoundedRectangle(cornerRadius: 14)
+                .strokeBorder(coral, lineWidth: 1.5)
+        }
+        .onGeometryChange(for: CGRect.self) { $0.frame(in: .named(reorderSpace)) } action: { cardFrames[block] = $0 }
+        .offset(y: reorder?.item == .block(block) ? reorder?.translation ?? 0 : 0)
+        .shadow(color: reorder?.item == .block(block) ? .black.opacity(0.25) : .clear, radius: 10, y: 4)
+    }
+
+    private var blockDivider: some View {
+        coral.opacity(0.35).frame(height: 0.5)
+    }
+
+    /// Compact − ×N + control; the system Stepper is too tall for the block header.
+    private func roundsStepper(_ rounds: Binding<Int>) -> some View {
+        HStack(spacing: 0) {
+            Button { rounds.wrappedValue -= 1 } label: {
+                Image(systemName: "minus")
+                    .frame(width: 34, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .disabled(rounds.wrappedValue <= 1)
+            .accessibilityLabel("Fewer rounds")
+
+            Text("×\(rounds.wrappedValue)")
+                .foregroundStyle(Color.primary)
+                .monospacedDigit()
+                .frame(minWidth: 30)
+
+            Button { rounds.wrappedValue += 1 } label: {
+                Image(systemName: "plus")
+                    .frame(width: 34, height: 30)
+                    .contentShape(Rectangle())
+            }
+            .disabled(rounds.wrappedValue >= 20)
+            .accessibilityLabel("More rounds")
+        }
+        .buttonStyle(.plain)
+        .font(.subheadline.weight(.semibold))
+        .foregroundStyle(coral)
+        .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func deleteBlock(_ block: Int) {
+        // Expanded round-rest pickers are keyed by block index, which shifts down past the deleted block
+        expandedRoundRests = Set(expandedRoundRests.compactMap { $0 == block ? nil : $0 > block ? $0 - 1 : $0 })
+        withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) { vm.deleteBlock(block) }
+    }
+
+    private func clearSets() {
+        expandedSets.removeAll()
+        expandedRoundRests.removeAll()
+        openSwipeID = nil
+        vm.clearSets()
+    }
+
+    private func listButton(_ title: String, tint: Color = .accentColor, action: @escaping () -> Void) -> some View {
+        Button {
+            withAnimation(.spring(response: 0.35, dampingFraction: 0.85), action)
+        } label: {
+            Text(title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(tint)
+                .frame(maxWidth: .infinity, minHeight: 44)
+                .background(Color(.tertiarySystemGroupedBackground), in: RoundedRectangle(cornerRadius: 10))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 10)
+                        .strokeBorder(Color(.separator), lineWidth: 0.5)
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func blockBinding(_ block: Int) -> Binding<WorkoutBlock> {
+        Binding(
+            get: { vm.blocks.indices.contains(block) ? vm.blocks[block] : WorkoutBlock(rounds: 1, restBetweenRoundsSeconds: 0) },
+            set: { if vm.blocks.indices.contains(block) { vm.blocks[block] = $0 } }
+        )
     }
 
     private func configBinding(for index: Int) -> Binding<PerSetConfig> {
@@ -515,10 +822,6 @@ private struct SetSettingsRow: View {
     private let tileGap: CGFloat = 6
     private let snap = Animation.spring(response: 0.3, dampingFraction: 0.86)
 
-    private var isNamed: Bool {
-        !config.label.trimmingCharacters(in: .whitespaces).isEmpty
-    }
-
     private var isPastDeleteThreshold: Bool {
         rowWidth > 0 && -swipeX > rowWidth * 0.55
     }
@@ -603,25 +906,32 @@ private struct SetSettingsRow: View {
                 HStack {
                     Image(systemName: "line.3.horizontal")
                         .font(.footnote)
-                        .foregroundStyle(isNamed ? Color.secondary : Color.secondary.opacity(0.3))
-                        .frame(width: 20)
+                        .foregroundStyle(Color.secondary)
+                        .frame(width: 20, height: 22)
+                        .contentShape(Rectangle().inset(by: -10))  // finger-sized grab area, same layout
                         .gesture(
                             DragGesture(minimumDistance: 5, coordinateSpace: .global)
-                                .onChanged { value in
-                                    guard isNamed else { return }
-                                    onDragHandleChanged?(value)
-                                }
-                                .onEnded { value in
-                                    guard isNamed else { return }
-                                    onDragHandleEnded?(value)
-                                }
+                                .onChanged { onDragHandleChanged?($0) }
+                                .onEnded { onDragHandleEnded?($0) }
                         )
-                    TextField("Set \(setIndex + 1) label", text: $config.label)
+                    TextField(config.placeholder ?? "Set \(setIndex + 1) label", text: $config.label)
                         .font(.subheadline)
                         .onChange(of: config.label) { _, new in
                             if new.count > 32 { config.label = String(new.prefix(32)) }
                         }
                     Spacer()
+                    // Work / rest at a glance; values that override the defaults stand out
+                    HStack(spacing: 0) {
+                        Text(clock(workBinding.wrappedValue))
+                            .foregroundStyle(config.workSecondsOverride == nil ? Color.primary : coral)
+                            .fontWeight(config.workSecondsOverride == nil ? .regular : .semibold)
+                        Text(" / ")
+                            .foregroundStyle(.secondary)
+                        Text(clock(restBinding.wrappedValue))
+                            .foregroundStyle(config.restSecondsOverride == nil ? Color.secondary : coral)
+                            .fontWeight(config.restSecondsOverride == nil ? .regular : .semibold)
+                    }
+                    .font(.footnote.monospacedDigit())
                     Button(action: onToggleExpand) {
                         Image(systemName: "chevron.right")
                             .font(.caption.weight(.semibold))
@@ -682,6 +992,34 @@ private struct SetSettingsRow: View {
             set: { config.restSecondsOverride = $0 }
         )
     }
+}
+
+private func clock(_ seconds: Int) -> String {
+    String(format: "%d:%02d", seconds / 60, seconds % 60)
+}
+
+/// Repeat-block accent; also marks per-set times that override the defaults.
+private let coral = Color(hex: "#FF6B6B")
+
+// MARK: - Reorder Types
+
+private let reorderSpace = "perSetList"
+
+/// An exercise row, or a whole block, being dragged to a new spot.
+private struct Reorder {
+    enum Item: Equatable { case row(UUID), block(Int) }
+    let item: Item
+    let start: CGRect               // item frame at pickup
+    var translation: CGFloat = 0
+    var target: DropTarget? = nil
+}
+
+/// Where a dragged item would land: an insertion index into the rows (counted without the
+/// dragged rows), the block a dropped row joins, and where to draw the insertion line.
+private struct DropTarget: Equatable {
+    let index: Int
+    let block: Int?
+    let y: CGFloat
 }
 
 // MARK: - Horizontal Pan

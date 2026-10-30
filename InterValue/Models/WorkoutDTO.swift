@@ -18,6 +18,7 @@ struct WorkoutDTO: Codable, Identifiable {
     var bellSoundName: String?
     var countdownEnabled: Bool?
     var intervals: [WorkoutIntervalDTO]
+    var blocks: [WorkoutBlock]?    // Optional so links shared before blocks existed still decode
 
     // MARK: - Init from SwiftData model
     init(workout: Workout) {
@@ -36,6 +37,7 @@ struct WorkoutDTO: Codable, Identifiable {
         self.intervals = workout.intervals
             .sorted { $0.setIndex < $1.setIndex }
             .map { WorkoutIntervalDTO(interval: $0) }
+        self.blocks = workout.blocks
     }
 
     // MARK: - Convert to SwiftData model
@@ -55,6 +57,7 @@ struct WorkoutDTO: Codable, Identifiable {
             bellSoundName: bellSoundName,
             countdownEnabled: countdownEnabled
         )
+        workout.blocks = blocks ?? []
         context.insert(workout)
 
         let workoutIntervals = intervals.map { dto -> WorkoutInterval in
@@ -64,6 +67,7 @@ struct WorkoutDTO: Codable, Identifiable {
                 label: dto.label,
                 workSecondsOverride: dto.workSecondsOverride,
                 restSecondsOverride: dto.restSecondsOverride,
+                blockIndex: dto.blockIndex,
                 workout: workout
             )
             context.insert(interval)
@@ -82,6 +86,7 @@ struct WorkoutIntervalDTO: Codable, Identifiable {
     var label: String
     var workSecondsOverride: Int?
     var restSecondsOverride: Int?
+    var blockIndex: Int?
 
     init(interval: WorkoutInterval) {
         self.id = interval.id
@@ -89,6 +94,7 @@ struct WorkoutIntervalDTO: Codable, Identifiable {
         self.label = interval.label
         self.workSecondsOverride = interval.workSecondsOverride
         self.restSecondsOverride = interval.restSecondsOverride
+        self.blockIndex = interval.blockIndex
     }
 
 }

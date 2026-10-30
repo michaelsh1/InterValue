@@ -30,6 +30,9 @@ class Workout {
     @Relationship(deleteRule: .cascade)
     var intervals: [WorkoutInterval]
 
+    // Repeat blocks, referenced by WorkoutInterval.blockIndex
+    var blocks: [WorkoutBlock] = []
+
     init(
         id: UUID = UUID(),
         name: String,
@@ -65,9 +68,9 @@ class Workout {
     // MARK: - Computed Properties
 
     var totalDurationSeconds: Int {
-        let workTotal = sets * workSeconds
-        let restTotal = (sets - 1) * restSeconds  // No rest after the last set
-        return prepareSeconds + workTotal + restTotal
+        let flat = flattenedSets()
+        let total = flat.reduce(0) { $0 + $1.workSeconds + $1.restSeconds }
+        return prepareSeconds + total - (flat.last?.restSeconds ?? 0)  // No rest after the last set
     }
 
     var totalDurationFormatted: String {
@@ -75,4 +78,61 @@ class Workout {
         let secs = totalDurationSeconds % 60
         return String(format: "%d:%02d", mins, secs)
     }
+
+    /// Number of sets the timer runs, with repeat blocks unrolled.
+    var totalSets: Int { flattenedSets().count }
+
+    /// Every set the timer runs, in order. A repeat block's rows play once per round,
+    /// with the block's round rest after its last row in every round but the final one.
+    func flattenedSets() -> [FlatSet] {
+        let byIndex = Dictionary(intervals.map { ($0.setIndex, $0) }, uniquingKeysWith: { first, _ in first })
+        var result: [FlatSet] = []
+        var start = 0
+        while start < sets {
+            let block = byIndex[start]?.blockIndex.flatMap { blocks.indices.contains($0) ? $0 : nil }
+            // Rows start..<end belong to this block (or are one standalone row)
+            var end = start + 1
+            if let block {
+                while end < sets, byIndex[end]?.blockIndex == block { end += 1 }
+            }
+            let rounds = block.map { max(1, blocks[$0].rounds) } ?? 1
+            for round in 0..<rounds {
+                for row in start..<end {
+                    let interval = byIndex[row]
+                    var rest = interval?.restSecondsOverride ?? restSeconds
+                    if let block, row == end - 1, round < rounds - 1 {
+                        rest = blocks[block].restBetweenRoundsSeconds
+                    }
+                    result.append(FlatSet(
+                        label: interval?.label ?? "",
+                        workSeconds: interval?.workSecondsOverride ?? workSeconds,
+                        restSeconds: rest,
+                        position: block.map { _ in
+                            BlockPosition(round: round + 1, rounds: rounds, exercise: row - start + 1, exercises: end - start)
+                        }
+                    ))
+                }
+            }
+            start = end
+        }
+        return result
+    }
+}
+
+// MARK: - WorkoutBlock
+
+/// A group of consecutive sets that repeats `rounds` times.
+struct WorkoutBlock: Codable, Hashable {
+    var rounds: Int
+    var restBetweenRoundsSeconds: Int
+}
+
+// MARK: - FlatSet
+
+/// One timed set after repeat blocks are unrolled.
+struct FlatSet {
+    let label: String
+    let workSeconds: Int
+    let restSeconds: Int          // Rest after this set; the timer skips it after the last set
+    let position: BlockPosition?  // nil outside a repeat block
 }

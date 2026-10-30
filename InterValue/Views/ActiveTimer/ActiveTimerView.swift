@@ -125,6 +125,8 @@ struct ActiveTimerView: View {
         VStack(spacing: 0) {
             Spacer()
 
+            roundPill(bottomSpacing: 28)
+
             Text(phaseLabel)
                 .font(largeWorkoutText ? .system(size: 52, weight: .bold) : .title.weight(.bold))
                 .foregroundStyle(.white)
@@ -161,7 +163,7 @@ struct ActiveTimerView: View {
 
             if vm.currentPhase == .work,
                UserDefaults.standard.object(forKey: "showSetPreview") as? Bool ?? true,
-               let next = nextSetLabel {
+               let next = nextPreview {
                 VStack(spacing: 2) {
                     Text("Next")
                         .font(.caption.weight(.semibold))
@@ -193,6 +195,8 @@ struct ActiveTimerView: View {
     private var landscapeTimerScreen: some View {
         VStack(spacing: 0) {
             Spacer()
+
+            roundPill(bottomSpacing: 10)
 
             // Phase / interval label — same font as portrait
             Text(phaseLabel)
@@ -240,7 +244,7 @@ struct ActiveTimerView: View {
 
             if vm.currentPhase == .work,
                UserDefaults.standard.object(forKey: "showSetPreview") as? Bool ?? true,
-               let next = nextSetLabel {
+               let next = nextPreview {
                 VStack(spacing: 2) {
                     Text("Next")
                         .font(.caption.weight(.semibold))
@@ -429,10 +433,43 @@ struct ActiveTimerView: View {
 
     private var setCounterText: String {
         switch vm.currentPhase {
-        case .prepare:       "Get Ready"
-        case .work, .rest:   "Set \(vm.currentSetIndex + 1) of \(vm.totalSets)"
-        case .finish:        ""
+        case .prepare:       return "Get Ready"
+        case .work, .rest:
+            if let p = blockPosition { return "Exercise \(p.exercise) / \(p.exercises)" }
+            return "Set \(vm.currentSetIndex + 1) of \(vm.totalSets)"
+        case .finish:        return ""
         }
+    }
+
+    private var blockPosition: BlockPosition? {
+        config.blockPositions.indices.contains(vm.currentSetIndex) ? config.blockPositions[vm.currentSetIndex] : nil
+    }
+
+    /// "↻ ROUND 2 OF 3" above the exercise name while inside a repeat block.
+    @ViewBuilder
+    private func roundPill(bottomSpacing: CGFloat) -> some View {
+        if let p = blockPosition, vm.currentPhase == .work || vm.currentPhase == .rest {
+            Label("Round \(p.round) of \(p.rounds)", systemImage: "repeat")
+                .font(largeWorkoutText ? .title3.weight(.semibold) : .callout.weight(.semibold))
+                .textCase(.uppercase)
+                .tracking(1)
+                .foregroundStyle(.white)
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+                .background(.black.opacity(0.14), in: Capsule())
+                .padding(.bottom, bottomSpacing)
+        }
+    }
+
+    /// The "Next" preview: the round rest on a round's last exercise, else the next set's label.
+    private var nextPreview: String? {
+        if vm.currentPhase == .work, let p = blockPosition, p.exercise == p.exercises, p.round < p.rounds {
+            let rest = config.perSetRestOverrides.indices.contains(vm.currentSetIndex)
+                ? config.perSetRestOverrides[vm.currentSetIndex] ?? config.restSeconds
+                : config.restSeconds
+            return "Round rest · " + String(format: "%d:%02d", rest / 60, rest % 60)
+        }
+        return nextSetLabel
     }
 
     private var nextSetLabel: String? {

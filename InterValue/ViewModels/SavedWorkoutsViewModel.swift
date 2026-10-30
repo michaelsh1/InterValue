@@ -45,22 +45,20 @@ class SavedWorkoutsViewModel {
     }
 
     func buildConfig(from workout: Workout, settings: AppSettings?) -> WorkoutConfiguration {
-        let sorted = workout.intervals.sorted { $0.setIndex < $1.setIndex }
-        let labels = sorted.map { $0.label }
-        let workOverrides: [Int?] = (0..<workout.sets).map { i in sorted.first { $0.setIndex == i }?.workSecondsOverride ?? nil }
-        let restOverrides: [Int?] = (0..<workout.sets).map { i in sorted.first { $0.setIndex == i }?.restSecondsOverride ?? nil }
+        let flat = workout.flattenedSets()
         return WorkoutConfiguration(
             workoutName: workout.name,
-            sets: workout.sets,
+            sets: flat.count,
             workSeconds: workout.workSeconds,
             restSeconds: workout.restSeconds,
             prepareSeconds: workout.prepareSeconds,
             bellSoundName: workout.bellSoundName ?? settings?.bellSoundName ?? "boxing_bell",
             countdownEnabled: workout.countdownEnabled ?? settings?.countdownEnabled ?? true,
             volume: settings?.volume ?? 1.0,
-            intervalLabels: labels,
-            perSetWorkOverrides: workOverrides,
-            perSetRestOverrides: restOverrides
+            intervalLabels: flat.map(\.label),
+            perSetWorkOverrides: flat.map(\.workSeconds),
+            perSetRestOverrides: flat.map(\.restSeconds),
+            blockPositions: flat.map(\.position)
         )
     }
 
@@ -81,9 +79,16 @@ class SavedWorkoutsViewModel {
             bellSoundName: workout.bellSoundName
         )
         let copiedIntervals = workout.intervals.map {
-            WorkoutInterval(setIndex: $0.setIndex, label: $0.label)
+            WorkoutInterval(
+                setIndex: $0.setIndex,
+                label: $0.label,
+                workSecondsOverride: $0.workSecondsOverride,
+                restSecondsOverride: $0.restSecondsOverride,
+                blockIndex: $0.blockIndex
+            )
         }
         copy.intervals = copiedIntervals
+        copy.blocks = workout.blocks
         context.insert(copy)
     }
 
