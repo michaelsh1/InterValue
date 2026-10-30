@@ -11,7 +11,6 @@ struct WorkoutCardView: View {
     @State private var showSetBreakdown = false
     @State private var showDeleteConfirmation = false
     @State private var didCopyBreakdown = false
-    @State private var breakdownBounce = false
 
     var body: some View {
         cardContent
@@ -151,32 +150,33 @@ struct WorkoutCardView: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                         .gridColumnAlignment(.leading)
-                    Text("|").foregroundStyle(.tertiary)
-                    Text("Work \(row.work)s")
-                    Text("|").foregroundStyle(.tertiary)
-                    Text("Rest \(row.rest)s")
+                    Text(clock(row.work))
+                        .foregroundStyle(.primary)
+                        .gridColumnAlignment(.trailing)
+                        .padding(.leading, 10)
+                    Text("/")
+                    Text(clock(row.rest))
+                        .gridColumnAlignment(.trailing)
                 }
             }
         }
-        .font(.subheadline)
+        .font(.subheadline.monospacedDigit())
         .foregroundStyle(.secondary)
-        .opacity(didCopyBreakdown ? 0.3 : 1.0)
+        .blur(radius: didCopyBreakdown ? 6 : 0)
+        .opacity(didCopyBreakdown ? 0.2 : 1.0)
         .padding(16)
         .frame(maxWidth: UIScreen.main.bounds.width - 32)
-        .scaleEffect(breakdownBounce ? 0.9 : 1.0)
         .contentShape(Rectangle())
         .overlay {
             if didCopyBreakdown {
-                HStack(spacing: 4) {
-                    Text("Copied")
-                    Image(systemName: "checkmark")
-                }
-                .font(.subheadline.weight(.semibold))
-                .foregroundStyle(.green)
-                .transition(.opacity)
+                Label("Copied", systemImage: "checkmark.circle.fill")
+                    .font(.headline)
+                    .foregroundStyle(.green)
+                    .transition(.scale(scale: 0.6).combined(with: .opacity))
             }
         }
         .onTapGesture { copyBreakdown() }
+        .sensoryFeedback(.success, trigger: didCopyBreakdown) { _, copied in copied }
         .presentationCompactAdaptation(.popover)
     }
 
@@ -203,29 +203,28 @@ struct WorkoutCardView: View {
         }
     }
 
-    // Plain-text copy: pad each column to its longest value so the `|` line up,
+    private func clock(_ seconds: Int) -> String {
+        String(format: "%d:%02d", seconds / 60, seconds % 60)
+    }
+
+    // Plain-text copy: pad the name column so the times line up,
     // matching the aligned grid layout shown in the popover.
     private var breakdownCopyText: String {
         let rows = breakdownRows
         let nameWidth = rows.map { $0.name.count }.max() ?? 0
-        let workWidth = rows.map { "Work \($0.work)s".count }.max() ?? 0
         return rows.map { row in
             let name = row.name.padding(toLength: nameWidth, withPad: " ", startingAt: 0)
-            let work = "Work \(row.work)s".padding(toLength: workWidth, withPad: " ", startingAt: 0)
-            return "\(name) | \(work) | Rest \(row.rest)s"
+            return "\(name)  \(clock(row.work)) / \(clock(row.rest))"
         }.joined(separator: "\n")
     }
 
     private func copyBreakdown() {
+        guard !didCopyBreakdown else { return }
         UIPasteboard.general.string = breakdownCopyText
 
-        withAnimation(.easeOut(duration: 0.1)) { breakdownBounce = true }
-        withAnimation(.easeInOut(duration: 0.2)) { didCopyBreakdown = true }
+        withAnimation(.spring(duration: 0.35, bounce: 0.4)) { didCopyBreakdown = true }
 
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            withAnimation(.spring(response: 0.35, dampingFraction: 0.55)) { breakdownBounce = false }
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.4) {
             withAnimation(.easeInOut(duration: 0.3)) { didCopyBreakdown = false }
         }
     }
