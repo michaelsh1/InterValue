@@ -7,15 +7,6 @@ struct AIGenerateDrawerView: View {
 
     @Environment(\.dismiss) private var dismiss
 
-    // Mode
-    private enum Mode: String, CaseIterable {
-        case build = "Build"
-        case text = "From Text"
-    }
-    @State private var mode: Mode = .build
-    @State private var workoutText: String = ""
-    @Namespace private var modeNamespace
-
     // Equipment
     private let fixedEquipment: [ChipOption] = [
         ChipOption("Pull-up Bar",       icon: .asset("pull-up-bar")),
@@ -61,9 +52,6 @@ struct AIGenerateDrawerView: View {
     @State private var errorMessage: String? = nil
 
     private var canGenerate: Bool {
-        if mode == .text {
-            return !workoutText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !isGenerating
-        }
         let hasEquip = !selectedEquipment.isEmpty || !customEquipmentText.isEmpty
         let hasPurp = !selectedPurposes.isEmpty || !customPurposeText.isEmpty
         return (hasEquip || hasPurp) && !isGenerating
@@ -72,24 +60,11 @@ struct AIGenerateDrawerView: View {
     var body: some View {
         NavigationStack {
             Form {
-                Section {
-                    modePicker
-                }
-                .listRowBackground(Color.clear)
-                .listRowInsets(EdgeInsets())
-                .listSectionSpacing(12)
-
-                if mode == .text {
-                    textSection
-                    textButtonsSection
-                } else {
-                    equipmentSection
-                    purposeSection
-                    difficultySection
-                    optionsSection
-                }
+                equipmentSection
+                purposeSection
+                difficultySection
+                optionsSection
             }
-            .contentMargins(.top, 8, for: .scrollContent)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .principal) {
@@ -154,9 +129,6 @@ struct AIGenerateDrawerView: View {
             .onChange(of: customPurposeDraft) { _, new in
                 if new.count > 100 { customPurposeDraft = String(new.prefix(100)) }
             }
-            .onChange(of: workoutText) { _, new in
-                if new.count > 3000 { workoutText = String(new.prefix(3000)) }
-            }
             .alert("Generation Failed", isPresented: Binding(
                 get: { errorMessage != nil },
                 set: { if !$0 { errorMessage = nil } }
@@ -169,72 +141,6 @@ struct AIGenerateDrawerView: View {
     }
 
     // MARK: - Sections
-
-    /// Segmented switch at the chips' height; the system segmented control only comes in ~31pt or ~47pt.
-    private var modePicker: some View {
-        HStack(spacing: 0) {
-            ForEach(Mode.allCases, id: \.self) { option in
-                let isSelected = mode == option
-                Button {
-                    withAnimation(.snappy(duration: 0.25)) { mode = option }
-                } label: {
-                    Text(option.rawValue)
-                        .font(.subheadline.weight(isSelected ? .semibold : .regular))
-                        .foregroundStyle(isSelected ? .primary : .secondary)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .background {
-                            if isSelected {
-                                Capsule()
-                                    .fill(Color(.systemBackground))
-                                    .shadow(color: .black.opacity(0.08), radius: 2, y: 1)
-                                    .matchedGeometryEffect(id: "selection", in: modeNamespace)
-                            }
-                        }
-                        .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .accessibilityAddTraits(isSelected ? .isSelected : [])
-            }
-        }
-        .padding(2)
-        .frame(height: 34)
-        .background(Capsule().fill(Color(.tertiarySystemFill)))
-    }
-
-    private var textSection: some View {
-        Section {
-            TextEditor(text: $workoutText)
-                .frame(minHeight: 200)
-                .overlay(alignment: .topLeading) {
-                    if workoutText.isEmpty {
-                        Text("3 rounds: burpees 45s, plank 60s, rest 15s between")
-                            .foregroundStyle(.tertiary)
-                            .padding(.top, 8)
-                            .padding(.leading, 5)
-                            .allowsHitTesting(false)
-                    }
-                }
-        } header: {
-            Text("Workout Text")
-        }
-        .listSectionSpacing(10)
-    }
-
-    private var textButtonsSection: some View {
-        Section {
-            HStack {
-                PasteButton(payloadType: String.self) { strings in
-                    if let text = strings.first { workoutText = text }
-                }
-                .buttonBorderShape(.capsule)
-                Spacer()
-                Button("Clear", role: .destructive) { workoutText = "" }
-                    .disabled(workoutText.isEmpty)
-            }
-        }
-        .listRowBackground(Color.clear)
-        .listRowInsets(EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4))
-    }
 
     private var equipmentSection: some View {
         Section("Equipment") {
@@ -343,20 +249,6 @@ struct AIGenerateDrawerView: View {
         isGenerating = true
         defer { isGenerating = false }
 
-        let availableCategories = WorkoutCategories.defaults.filter { $0 != "All" && $0 != "Custom" }
-
-        if mode == .text {
-            do {
-                let result = try await AIService.shared.parseWorkout(text: workoutText, availableCategories: availableCategories)
-                onApply(result)
-                dismiss()
-            } catch {
-                errorMessage = (error as? AIServiceError)?.localizedDescription
-                    ?? "Generation failed. Please try again later."
-            }
-            return
-        }
-
         var equipment = fixedEquipment.filter { selectedEquipment.contains($0.title) }.map(\.title)
         if !customEquipmentText.isEmpty { equipment.append(customEquipmentText) }
 
@@ -366,6 +258,7 @@ struct AIGenerateDrawerView: View {
         let existingLabels: [String]? = overrideSets ? nil : existingConfigs.map { $0.label }
 
         do {
+            let availableCategories = WorkoutCategories.defaults.filter { $0 != "All" && $0 != "Custom" }
             let result = try await AIService.shared.generateWorkout(
                 equipment: equipment,
                 purposes: purposes,
