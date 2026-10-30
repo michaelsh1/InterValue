@@ -2,7 +2,8 @@ import Foundation
 import Observation
 import SwiftData
 
-struct PerSetConfig {
+struct PerSetConfig: Identifiable {
+    let id = UUID()
     var label: String = ""
     var workSecondsOverride: Int? = nil
     var restSecondsOverride: Int? = nil
@@ -77,7 +78,7 @@ class CreateWorkoutViewModel {
             workSeconds = settings?.defaultWorkSeconds ?? 20
             restSeconds = settings?.defaultRestSeconds ?? 10
             prepareSeconds = settings?.defaultPrepareSeconds ?? 10
-            perSetConfigs = Array(repeating: PerSetConfig(), count: sets)
+            perSetConfigs = (0..<sets).map { _ in PerSetConfig() }
         }
     }
 
@@ -85,10 +86,16 @@ class CreateWorkoutViewModel {
 
     private func syncPerSetConfigs() {
         if sets > perSetConfigs.count {
-            perSetConfigs.append(contentsOf: Array(repeating: PerSetConfig(), count: sets - perSetConfigs.count))
+            perSetConfigs.append(contentsOf: (perSetConfigs.count..<sets).map { _ in PerSetConfig() })
         } else if sets < perSetConfigs.count {
             perSetConfigs = Array(perSetConfigs.prefix(sets))
         }
+    }
+
+    func deleteSet(id: UUID) {
+        guard sets > 1, let index = perSetConfigs.firstIndex(where: { $0.id == id }) else { return }
+        perSetConfigs.remove(at: index)
+        sets -= 1
     }
 
     // MARK: - Validation

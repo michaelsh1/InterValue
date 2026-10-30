@@ -8,13 +8,15 @@ struct CreateWorkoutView: View {
 
     @Environment(\.colorScheme) private var colorScheme
     @State private var vm: CreateWorkoutViewModel
-    @State private var expandedSets: Set<Int> = []
+    @State private var expandedSets: Set<UUID> = []
     @State private var showPerSetSettings: Bool = false
     @State private var showAIDrawer: Bool = false
     @State private var aiUnavailableMessage: String? = nil
     @State private var showIconPicker: Bool = false
     @State private var draggingIndex: Int? = nil
     @State private var dragOffsetY: CGFloat = 0
+    @State private var openSwipeID: UUID? = nil
+    @State private var deleteCount = 0
     private let rowSlotHeight: CGFloat = 46
 
     init(workout: Workout? = nil, settings: AppSettings? = nil) {
@@ -31,6 +33,9 @@ struct CreateWorkoutView: View {
                 bellSoundSection
             }
             .scrollDismissesKeyboard(.immediately)
+            .onScrollPhaseChange { _, phase in
+                if phase.isScrolling { openSwipeID = nil }
+            }
             .contentMargins(.top, 0, for: .scrollContent)
             .navigationTitle(vm.isEditMode ? "Edit Workout" : "Create Workout")
             .navigationBarTitleDisplayMode(.inline)
@@ -265,21 +270,23 @@ struct CreateWorkoutView: View {
                 .listRowSeparator(.hidden)
 
                 VStack(spacing: 8) {
-                    ForEach(0..<vm.sets, id: \.self) { i in
+                    ForEach(Array(vm.perSetConfigs.enumerated()), id: \.element.id) { i, item in
                         let isDragging = draggingIndex == i
                         SetSettingsRow(
                             setIndex: i,
                             config: configBinding(for: i),
-                            isExpanded: expandedSets.contains(i),
+                            isExpanded: expandedSets.contains(item.id),
                             globalWorkSeconds: vm.workSeconds,
                             globalRestSeconds: vm.restSeconds,
                             onToggleExpand: {
-                                if expandedSets.contains(i) { expandedSets.remove(i) }
-                                else { expandedSets.insert(i) }
+                                openSwipeID = nil
+                                if expandedSets.contains(item.id) { expandedSets.remove(item.id) }
+                                else { expandedSets.insert(item.id) }
                             },
                             onDragHandleChanged: { value in
                                 if draggingIndex == nil {
                                     draggingIndex = i
+                                    openSwipeID = nil
                                     expandedSets.removeAll()
                                 }
                                 dragOffsetY = value.translation.height
@@ -298,6 +305,20 @@ struct CreateWorkoutView: View {
                                     dragOffsetY = 0
                                 }
                             },
+                            canDelete: vm.sets > 1,
+                            isSwipeOpen: openSwipeID == item.id,
+                            onSwipeOpenChange: { open in
+                                if open { openSwipeID = item.id }
+                                else if openSwipeID == item.id { openSwipeID = nil }
+                            },
+                            onDelete: {
+                                expandedSets.remove(item.id)
+                                openSwipeID = nil
+                                deleteCount += 1
+                                withAnimation(.spring(response: 0.35, dampingFraction: 0.85)) {
+                                    vm.deleteSet(id: item.id)
+                                }
+                            }
                         )
                         .offset(y: isDragging ? dragOffsetY : rowShiftOffset(for: i))
                         .zIndex(isDragging ? 1 : 0)
@@ -305,7 +326,7 @@ struct CreateWorkoutView: View {
                         .animation(.interactiveSpring(response: 0.25, dampingFraction: 0.8), value: rowShiftOffset(for: i))
                     }
                 }
-                .id(vm.sets)
+                .sensoryFeedback(.impact(weight: .medium), trigger: deleteCount)
                 .listRowInsets(EdgeInsets(top: 8, leading: 16, bottom: 8, trailing: 16))
             }
         }
@@ -481,12 +502,103 @@ private struct SetSettingsRow: View {
     let onToggleExpand: () -> Void
     var onDragHandleChanged: ((DragGesture.Value) -> Void)? = nil
     var onDragHandleEnded: ((DragGesture.Value) -> Void)? = nil
+    var canDelete: Bool = false
+    var isSwipeOpen: Bool = false
+    var onSwipeOpenChange: ((Bool) -> Void)? = nil
+    var onDelete: (() -> Void)? = nil
+
+    @State private var swipeX: CGFloat = 0
+    @State private var swipeStartX: CGFloat = 0
+    @State private var isSwiping = false
+    @State private var rowWidth: CGFloat = 0
+    private let revealWidth: CGFloat = 64
+    private let tileGap: CGFloat = 6
+    private let snap = Animation.spring(response: 0.3, dampingFraction: 0.86)
 
     private var isNamed: Bool {
         !config.label.trimmingCharacters(in: .whitespaces).isEmpty
     }
 
+    private var isPastDeleteThreshold: Bool {
+        rowWidth > 0 && -swipeX > rowWidth * 0.55
+    }
+
     var body: some View {
+        content
+            .offset(x: swipeX)
+            .overlay {
+                if isSwipeOpen {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .offset(x: swipeX)
+                        .onTapGesture { onSwipeOpenChange?(false) }
+                }
+            }
+            .background(alignment: .trailing) {
+                if swipeX < 0 {
+                    Button(action: slideOutAndDelete) {
+                        // Full-height tile that stretches with the swipe; past the threshold
+                        // the X jumps to ride the row's edge, like Mail's full swipe
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(.red)
+                            .overlay(alignment: isPastDeleteThreshold ? .leading : .center) {
+                                Image(systemName: "xmark")
+                                    .font(.body.weight(.semibold))
+                                    .foregroundStyle(.white)
+                                    .frame(width: revealWidth - tileGap)
+                                    .scaleEffect(min(1, -swipeX / revealWidth))
+                            }
+                            .animation(.spring(response: 0.25, dampingFraction: 0.8), value: isPastDeleteThreshold)
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Delete set \(setIndex + 1)")
+                    .frame(width: max(0, -swipeX - tileGap))
+                    .frame(maxHeight: .infinity)
+                }
+            }
+            .clipShape(RoundedRectangle(cornerRadius: 8))
+        .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { rowWidth = $0 }
+        .gesture(HorizontalPanGesture(
+            onBegan: {
+                guard canDelete else { return }
+                isSwiping = true
+                swipeStartX = swipeX
+                onSwipeOpenChange?(true)
+            },
+            onChanged: { dx in
+                guard isSwiping else { return }
+                let x = swipeStartX + dx
+                swipeX = x > 0 ? x / 5 : max(x, -rowWidth)  // rubber-band past closed
+            },
+            onEnded: { velocity in
+                guard isSwiping else { return }
+                isSwiping = false
+                if isPastDeleteThreshold {
+                    slideOutAndDelete()
+                } else if swipeX + velocity * 0.15 < -revealWidth / 2 {
+                    withAnimation(snap) { swipeX = -revealWidth }
+                } else {
+                    withAnimation(snap) { swipeX = 0 }
+                    onSwipeOpenChange?(false)
+                }
+            }
+        ))
+        .onChange(of: isSwipeOpen) { _, open in
+            if !open && !isSwiping { withAnimation(snap) { swipeX = 0 } }
+        }
+        .sensoryFeedback(.impact(weight: .light), trigger: isPastDeleteThreshold)
+        .sensoryFeedback(.selection, trigger: isSwipeOpen) { _, open in open }
+    }
+
+    private func slideOutAndDelete() {
+        withAnimation(.easeOut(duration: 0.2)) {
+            swipeX = -rowWidth
+        } completion: {
+            onDelete?()
+        }
+    }
+
+    private var content: some View {
         VStack(spacing: 0) {
                 HStack {
                     Image(systemName: "line.3.horizontal")
@@ -569,6 +681,45 @@ private struct SetSettingsRow: View {
             get: { config.restSecondsOverride ?? globalRestSeconds },
             set: { config.restSecondsOverride = $0 }
         )
+    }
+}
+
+// MARK: - Horizontal Pan
+
+/// UIKit pan that only begins on mostly-horizontal drags, so vertical scrolling stays with the Form.
+private struct HorizontalPanGesture: UIGestureRecognizerRepresentable {
+    var onBegan: () -> Void
+    var onChanged: (CGFloat) -> Void
+    var onEnded: (_ velocity: CGFloat) -> Void
+
+    func makeCoordinator(converter: CoordinateSpaceConverter) -> Coordinator { Coordinator() }
+
+    func makeUIGestureRecognizer(context: Context) -> UIPanGestureRecognizer {
+        let pan = UIPanGestureRecognizer()
+        pan.delegate = context.coordinator
+        return pan
+    }
+
+    func handleUIGestureRecognizerAction(_ pan: UIPanGestureRecognizer, context: Context) {
+        switch pan.state {
+        case .began:
+            onBegan()
+            onChanged(pan.translation(in: pan.view).x)
+        case .changed:
+            onChanged(pan.translation(in: pan.view).x)
+        case .ended, .cancelled, .failed:
+            onEnded(pan.velocity(in: pan.view).x)
+        default:
+            break
+        }
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        func gestureRecognizerShouldBegin(_ recognizer: UIGestureRecognizer) -> Bool {
+            guard let pan = recognizer as? UIPanGestureRecognizer else { return false }
+            let velocity = pan.velocity(in: pan.view)
+            return abs(velocity.x) > abs(velocity.y)
+        }
     }
 }
 
